@@ -10,6 +10,11 @@ import seaborn as sns
 import matplotlib.pyplot as plt
 from datetime import datetime, timedelta
 import warnings
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import LabelEncoder
+from sklearn.metrics import mean_squared_error, r2_score, mean_absolute_error
+import os
 warnings.filterwarnings('ignore')
 
 # Set Streamlit page config
@@ -79,18 +84,155 @@ if 'prediction_history' not in st.session_state:
 if 'favorite_stations' not in st.session_state:
     st.session_state.favorite_stations = []
 
-# Load model and columns (with error handling)
-@st.cache_resource
-def load_model_data():
+# Define pollutant information based on your dataset
+pollutant_info = {
+    'NH4': {'name': 'Ammonia', 'unit': 'mg/L', 'safe_range': (0, 0.5), 'description': 'Nitrogen compound, toxic to aquatic life'},
+    'BSK5': {'name': 'BOD5', 'unit': 'mg/L', 'safe_range': (0, 3), 'description': 'Biochemical Oxygen Demand'},
+    'Suspended': {'name': 'Suspended Solids', 'unit': 'mg/L', 'safe_range': (0, 25), 'description': 'Total suspended particles'},
+    'O2': {'name': 'Dissolved Oxygen', 'unit': 'mg/L', 'safe_range': (5, 14), 'description': 'Essential for aquatic life'},
+    'NO3': {'name': 'Nitrate', 'unit': 'mg/L', 'safe_range': (0, 10), 'description': 'Common agricultural pollutant'},
+    'NO2': {'name': 'Nitrite', 'unit': 'mg/L', 'safe_range': (0, 1), 'description': 'Intermediate nitrogen compound'},
+    'SO4': {'name': 'Sulfate', 'unit': 'mg/L', 'safe_range': (0, 250), 'description': 'Industrial pollutant'},
+    'PO4': {'name': 'Phosphate', 'unit': 'mg/L', 'safe_range': (0, 0.1), 'description': 'Causes eutrophication'},
+    'CL': {'name': 'Chloride', 'unit': 'mg/L', 'safe_range': (0, 250), 'description': 'Salt contamination indicator'}
+}
+
+# Data loading and preprocessing functions
+@st.cache_data
+def load_and_preprocess_data():
+    """Load and preprocess the water quality dataset"""
     try:
+        # Try to load the dataset
+        file_path = r"C:\Users\HP\OneDrive\Desktop\WaterPrediction\afa2e701598d20110228.xls"
+        
+        if os.path.exists(file_path):
+            # Load the Excel file
+            df = pd.read_excel(file_path)
+        else:
+            st.error(f"File not found: {file_path}")
+            return None
+        
+        # Rename columns to match expected format
+        column_mapping = {
+            'id': 'station_id',
+            'date': 'date',
+            'NH4': 'NH4',
+            'BSK5': 'BSK5',
+            'Suspended': 'Suspended',
+            'O2': 'O2',
+            'NO3': 'NO3',
+            'NO2': 'NO2',
+            'SO4': 'SO4',
+            'PO4': 'PO4',
+            'CL': 'CL'
+        }
+        
+        # Check if columns exist and rename
+        existing_columns = df.columns.tolist()
+        df.columns = [column_mapping.get(col, col) for col in existing_columns]
+        
+        # Convert date column to datetime
+        df['date'] = pd.to_datetime(df['date'], format='%d.%m.%Y', errors='coerce')
+        
+        # Extract year, month, day for modeling
+        df['year'] = df['date'].dt.year
+        df['month'] = df['date'].dt.month
+        df['day'] = df['date'].dt.day
+        df['day_of_year'] = df['date'].dt.dayofyear
+        
+        # Handle missing values
+        pollutant_columns = ['NH4', 'BSK5', 'Suspended', 'O2', 'NO3', 'NO2', 'SO4', 'PO4', 'CL']
+        for col in pollutant_columns:
+            if col in df.columns:
+                df[col] = pd.to_numeric(df[col], errors='coerce')
+                df[col] = df[col].fillna(df[col].mean())
+        
+        # Remove rows with invalid dates
+        df = df.dropna(subset=['date'])
+        
+        return df
+        
+    except Exception as e:
+        st.error(f"Error loading data: {str(e)}")
+        return None
+
+# Load the actual dataset
+data = load_and_preprocess_data()
+
+# Model training and loading functions
+@st.cache_resource
+def train_or_load_model():
+    """Train a new model or load existing one"""
+    if data is None:
+        return None, None, None
+    
+    try:
+        # Try to load existing model
         model = joblib.load("pollution_model.pkl")
         model_cols = joblib.load("model_columns.pkl")
-        return model, model_cols
-    except FileNotFoundError:
-        st.error("⚠️ Model files not found. Please ensure 'pollution_model.pkl' and 'model_columns.pkl' are in the same directory.")
-        return None, None
+        scaler = joblib.load("scaler.pkl")
+        st.success("✅ Loaded existing model successfully!")
+        return model, model_cols, scaler
+    except:
+        st.info("🔄 Training new model...")
+        return train_new_model()
 
-model, model_cols = load_model_data()
+def train_new_model():
+    """Train a new Random Forest model"""
+    if data is None:
+        return None, None, None
+    
+    try:
+        # Prepare features and targets
+        feature_columns = ['station_id', 'year', 'month', 'day_of_year']
+        target_columns = ['NH4', 'BSK5', 'Suspended', 'O2', 'NO3', 'NO2', 'SO4', 'PO4', 'CL']
+        
+        # Encode station_id
+        le = LabelEncoder()
+        df_model = data.copy()
+        df_model['station_id_encoded'] = le.fit_transform(df_model['station_id'].astype(str))
+        
+        # Prepare final feature set
+        X = df_model[['station_id_encoded', 'year', 'month', 'day_of_year']]
+        y = df_model[target_columns]
+        
+        # Remove rows with missing target values
+        mask = ~y.isnull().any(axis=1)
+        X = X[mask]
+        y = y[mask]
+        
+        # Split data
+        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+        
+        # Train model
+        model = RandomForestRegressor(n_estimators=100, random_state=42, n_jobs=-1)
+        model.fit(X_train, y_train)
+        
+        # Save model and metadata
+        model_info = {
+            'model': model,
+            'feature_columns': X.columns.tolist(),
+            'target_columns': target_columns,
+            'label_encoder': le,
+            'train_score': model.score(X_train, y_train),
+            'test_score': model.score(X_test, y_test)
+        }
+        
+        # Save to files
+        joblib.dump(model, "pollution_model.pkl")
+        joblib.dump(X.columns.tolist(), "model_columns.pkl")
+        joblib.dump(le, "label_encoder.pkl")
+        
+        st.success(f"✅ Model trained successfully! Test R² Score: {model_info['test_score']:.3f}")
+        
+        return model, X.columns.tolist(), le
+        
+    except Exception as e:
+        st.error(f"Error training model: {str(e)}")
+        return None, None, None
+
+# Load model
+model, model_cols, label_encoder = train_or_load_model()
 
 # Sidebar Navigation
 st.sidebar.markdown("# 🧭 Navigation")
@@ -99,45 +241,9 @@ page = st.sidebar.selectbox(
     ["🏠 Home", "🔍 Predictor", "📊 Data Analysis", "📈 Visualizations", "🎯 Model Insights", "📋 History", "ℹ️ About"]
 )
 
-# Define pollutant information
-pollutant_info = {
-    'O₂': {'name': 'Dissolved Oxygen', 'unit': 'mg/L', 'safe_range': (5, 14), 'description': 'Essential for aquatic life'},
-    'NO₃': {'name': 'Nitrate', 'unit': 'mg/L', 'safe_range': (0, 10), 'description': 'Common agricultural pollutant'},
-    'NO₂': {'name': 'Nitrite', 'unit': 'mg/L', 'safe_range': (0, 1), 'description': 'Intermediate nitrogen compound'},
-    'SO₄': {'name': 'Sulfate', 'unit': 'mg/L', 'safe_range': (0, 250), 'description': 'Industrial pollutant'},
-    'PO₄': {'name': 'Phosphate', 'unit': 'mg/L', 'safe_range': (0, 0.1), 'description': 'Causes eutrophication'},
-    'Cl⁻': {'name': 'Chloride', 'unit': 'mg/L', 'safe_range': (0, 250), 'description': 'Salt contamination indicator'}
-}
-
-# Helper function to generate sample data for demonstration
-@st.cache_data
-def generate_sample_data():
-    np.random.seed(42)
-    years = list(range(2015, 2025))
-    stations = [f'STN{i:03d}' for i in range(1, 21)]
-    
-    data = []
-    for year in years:
-        for station in stations:
-            # Generate realistic pollutant values with some correlation
-            base_pollution = np.random.normal(0, 1)
-            data.append({
-                'year': year,
-                'station_id': station,
-                'O₂': max(0, 8 + np.random.normal(0, 2)),
-                'NO₃': max(0, 5 + base_pollution + np.random.normal(0, 3)),
-                'NO₂': max(0, 0.5 + base_pollution*0.3 + np.random.normal(0, 0.5)),
-                'SO₄': max(0, 20 + base_pollution*2 + np.random.normal(0, 10)),
-                'PO₄': max(0, 0.05 + base_pollution*0.02 + np.random.normal(0, 0.03)),
-                'Cl⁻': max(0, 15 + base_pollution*3 + np.random.normal(0, 8))
-            })
-    
-    return pd.DataFrame(data)
-
-sample_data = generate_sample_data()
-
 # Function to assess water quality
 def assess_water_quality(pollutant_values):
+    """Assess overall water quality based on pollutant levels"""
     scores = []
     for pollutant, value in pollutant_values.items():
         if pollutant in pollutant_info:
@@ -163,70 +269,62 @@ def assess_water_quality(pollutant_values):
 if page == "🏠 Home":
     st.markdown("<h1 class='main-header'>💧 Water Quality Monitoring System</h1>", unsafe_allow_html=True)
     
-    # Welcome message
-    st.markdown("""
-    <div class='info-box'>
-        <h3>🌊 Welcome to the Water Quality Monitoring System</h3>
-        <p>This comprehensive platform helps you monitor and predict water pollutant levels across different monitoring stations. 
-        Use advanced machine learning to understand water quality trends and make informed decisions.</p>
-    </div>
-    """, unsafe_allow_html=True)
-    
-    # Key Features
-    col1, col2, col3 = st.columns(3)
-    
-    with col1:
+    if data is not None:
+        # Welcome message
         st.markdown("""
-        <div class='metric-card'>
-            <h3>🔍 Smart Predictions</h3>
-            <p>AI-powered pollutant level predictions based on historical data and environmental factors</p>
+        <div class='info-box'>
+            <h3>🌊 Welcome to the Water Quality Monitoring System</h3>
+            <p>This comprehensive platform analyzes your water quality dataset and provides AI-powered predictions 
+            for various pollutant levels across different monitoring stations.</p>
         </div>
         """, unsafe_allow_html=True)
+        
+        # Dataset overview
+        col1, col2, col3, col4 = st.columns(4)
+        
+        with col1:
+            st.metric("📊 Total Records", f"{len(data):,}")
+        with col2:
+            st.metric("🏭 Monitoring Stations", data['station_id'].nunique())
+        with col3:
+            st.metric("📅 Date Range", f"{data['year'].min()} - {data['year'].max()}")
+        with col4:
+            st.metric("🧪 Pollutants Tracked", len(pollutant_info))
+        
+        # Recent measurements
+        st.markdown("## 📊 Recent Measurements")
+        latest_data = data.nlargest(5, 'date')
+        st.dataframe(latest_data[['station_id', 'date', 'NH4', 'O2', 'NO3', 'PO4']], use_container_width=True)
+        
+        # Quick statistics
+        st.markdown("## 📈 Quick Statistics")
+        col1, col2 = st.columns(2)
+        
+        with col1:
+            # Average pollutant levels
+            avg_pollutants = data[list(pollutant_info.keys())].mean()
+            st.markdown("### Average Pollutant Levels")
+            for pollutant, avg_val in avg_pollutants.items():
+                safe_min, safe_max = pollutant_info[pollutant]['safe_range']
+                status = "🟢" if safe_min <= avg_val <= safe_max else "🔴"
+                st.write(f"{status} {pollutant}: {avg_val:.3f} {pollutant_info[pollutant]['unit']}")
+        
+        with col2:
+            # Station with most measurements
+            station_counts = data['station_id'].value_counts()
+            st.markdown("### Most Active Stations")
+            for station, count in station_counts.head(5).items():
+                st.write(f"🏭 Station {station}: {count} measurements")
     
-    with col2:
-        st.markdown("""
-        <div class='metric-card'>
-            <h3>📊 Data Analytics</h3>
-            <p>Comprehensive analysis tools to understand pollution trends and patterns</p>
-        </div>
-        """, unsafe_allow_html=True)
-    
-    with col3:
-        st.markdown("""
-        <div class='metric-card'>
-            <h3>📈 Visualizations</h3>
-            <p>Interactive charts and graphs for better understanding of water quality data</p>
-        </div>
-        """, unsafe_allow_html=True)
-    
-    # Quick Stats
-    st.markdown("## 📊 System Overview")
-    col1, col2, col3, col4 = st.columns(4)
-    
-    with col1:
-        st.metric("🏭 Monitoring Stations", "20+", "2 new this month")
-    with col2:
-        st.metric("📅 Years of Data", "10", "2015-2024")
-    with col3:
-        st.metric("🧪 Pollutants Tracked", "6", "O₂, NO₃, NO₂, SO₄, PO₄, Cl⁻")
-    with col4:
-        st.metric("🎯 Prediction Accuracy", "95%", "±2% this quarter")
-    
-    # Recent Activity
-    st.markdown("## 🕐 Recent Activity")
-    if st.session_state.prediction_history:
-        recent_predictions = st.session_state.prediction_history[-5:]  # Last 5 predictions
-        for pred in recent_predictions:
-            st.markdown(f"- **Station {pred['station']}** ({pred['year']}) - Quality: {pred['quality']}")
     else:
-        st.info("No recent predictions. Visit the Predictor page to get started!")
+        st.error("❌ Unable to load dataset. Please check the file path and format.")
 
 # PAGE: PREDICTOR
 elif page == "🔍 Predictor":
     st.markdown("<h1 class='main-header'>🔍 Water Pollutants Predictor</h1>", unsafe_allow_html=True)
     
-    if model is None or model_cols is None:
-        st.error("Model not loaded. Please check if the model files are available.")
+    if data is None or model is None:
+        st.error("❌ Model or data not available. Please check your dataset and model files.")
         st.stop()
     
     # Input section
@@ -235,69 +333,84 @@ elif page == "🔍 Predictor":
     col1, col2 = st.columns(2)
     
     with col1:
-        year_input = st.number_input(
-            "📆 Enter Year",
-            min_value=2000,
-            max_value=2100,
-            value=2024,
-            help="Select the year for prediction"
+        # Get available stations from data
+        available_stations = sorted(data['station_id'].unique())
+        station_id = st.selectbox(
+            "🏞️ Select Station ID",
+            options=available_stations,
+            help="Choose from available monitoring stations"
         )
     
     with col2:
-        station_id = st.text_input(
-            "🏞️ Enter Station ID",
-            value='STN001',
-            help="Enter the monitoring station ID (e.g., STN001, STN002)"
+        year_input = st.number_input(
+            "📆 Enter Year",
+            min_value=int(data['year'].min()),
+            max_value=2030,
+            value=int(data['year'].max()),
+            help="Year for prediction"
+        )
+    
+    col3, col4 = st.columns(2)
+    
+    with col3:
+        month_input = st.slider(
+            "📅 Month",
+            min_value=1,
+            max_value=12,
+            value=6,
+            help="Month of the year (1-12)"
+        )
+    
+    with col4:
+        day_of_year = st.slider(
+            "📅 Day of Year",
+            min_value=1,
+            max_value=365,
+            value=150,
+            help="Day of the year (1-365)"
         )
     
     # Advanced options
     with st.expander("⚙️ Advanced Options"):
-        show_confidence = st.checkbox("Show prediction confidence intervals", value=True)
-        compare_historical = st.checkbox("Compare with historical data", value=False)
+        show_confidence = st.checkbox("Show prediction confidence", value=True)
+        compare_historical = st.checkbox("Compare with historical data", value=True)
         save_to_favorites = st.checkbox("Save station to favorites", value=False)
     
     # Predict button
     if st.button('🔍 Predict Water Quality', type="primary"):
-        if not station_id:
-            st.warning('⚠️ Please enter a valid station ID.')
-        else:
-            try:
-                # For demonstration, we'll use sample data since we don't have the actual model
-                # In real implementation, use the actual model prediction
-                
-                # Simulate model prediction
-                np.random.seed(hash(station_id + str(year_input)) % 1000)
-                base_pollution = np.random.normal(0, 1)
-                
-                predicted_pollutants = {
-                    'O₂': max(0, 8 + np.random.normal(0, 2)),
-                    'NO₃': max(0, 5 + base_pollution + np.random.normal(0, 3)),
-                    'NO₂': max(0, 0.5 + base_pollution*0.3 + np.random.normal(0, 0.5)),
-                    'SO₄': max(0, 20 + base_pollution*2 + np.random.normal(0, 10)),
-                    'PO₄': max(0, 0.05 + base_pollution*0.02 + np.random.normal(0, 0.03)),
-                    'Cl⁻': max(0, 15 + base_pollution*3 + np.random.normal(0, 8))
-                }
-                
-                # Assess water quality
-                quality_rating, quality_type = assess_water_quality(predicted_pollutants)
-                
-                # Display results
-                st.markdown(f"<h3 style='color:#023e8a;'>Results for Station <code>{station_id}</code> in {year_input}</h3>", unsafe_allow_html=True)
-                
-                # Overall quality score
-                if quality_type == "success":
-                    st.success(f"🎉 Water Quality: **{quality_rating}**")
-                elif quality_type == "warning":
-                    st.warning(f"⚠️ Water Quality: **{quality_rating}**")
-                else:
-                    st.error(f"🚨 Water Quality: **{quality_rating}**")
-                
-                # Pollutant results
-                st.markdown("### 🧪 Pollutant Levels")
-                cols = st.columns(3)
-                
-                for i, (pollutant, value) in enumerate(predicted_pollutants.items()):
-                    with cols[i % 3]:
+        try:
+            # Prepare input data
+            station_encoded = label_encoder.transform([str(station_id)])[0]
+            input_data = np.array([[station_encoded, year_input, month_input, day_of_year]])
+            
+            # Make prediction
+            prediction = model.predict(input_data)[0]
+            
+            # Create prediction dictionary
+            target_columns = ['NH4', 'BSK5', 'Suspended', 'O2', 'NO3', 'NO2', 'SO4', 'PO4', 'CL']
+            predicted_pollutants = dict(zip(target_columns, prediction))
+            
+            # Assess water quality
+            quality_rating, quality_type = assess_water_quality(predicted_pollutants)
+            
+            # Display results
+            st.markdown(f"<h3 style='color:#023e8a;'>Results for Station <code>{station_id}</code> on {year_input}-{month_input:02d}</h3>", unsafe_allow_html=True)
+            
+            # Overall quality score
+            if quality_type == "success":
+                st.success(f"🎉 Water Quality: **{quality_rating}**")
+            elif quality_type == "warning":
+                st.warning(f"⚠️ Water Quality: **{quality_rating}**")
+            else:
+                st.error(f"🚨 Water Quality: **{quality_rating}**")
+            
+            # Pollutant results
+            st.markdown("### 🧪 Predicted Pollutant Levels")
+            cols = st.columns(3)
+            
+            for i, (pollutant, value) in enumerate(predicted_pollutants.items()):
+                with cols[i % 3]:
+                    if pollutant in pollutant_info:
                         info = pollutant_info[pollutant]
                         safe_min, safe_max = info['safe_range']
                         
@@ -315,221 +428,215 @@ elif page == "🔍 Predictor":
                         st.markdown(f"""
                         <div class='metric-card'>
                             <h4 style='color:{color};'>{pollutant}</h4>
-                            <div class='metric-value'>{value:.2f}</div>
+                            <div class='metric-value'>{value:.3f}</div>
                             <div class='metric-label'>{info['unit']}</div>
                             <p style='margin-top:0.5rem;'>{status}</p>
                         </div>
                         """, unsafe_allow_html=True)
+            
+            # Save to history
+            prediction_record = {
+                'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                'station': station_id,
+                'year': year_input,
+                'month': month_input,
+                'quality': quality_rating,
+                'pollutants': predicted_pollutants
+            }
+            st.session_state.prediction_history.append(prediction_record)
+            
+            # Save to favorites if requested
+            if save_to_favorites and station_id not in st.session_state.favorite_stations:
+                st.session_state.favorite_stations.append(station_id)
+                st.success(f"Station {station_id} added to favorites!")
+            
+            # Compare with historical data if requested
+            if compare_historical:
+                st.markdown("### 📈 Historical Comparison")
+                station_data = data[data['station_id'] == station_id].sort_values('date')
                 
-                # Save to history
-                prediction_record = {
-                    'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
-                    'station': station_id,
-                    'year': year_input,
-                    'quality': quality_rating,
-                    'pollutants': predicted_pollutants
-                }
-                st.session_state.prediction_history.append(prediction_record)
-                
-                # Save to favorites if requested
-                if save_to_favorites and station_id not in st.session_state.favorite_stations:
-                    st.session_state.favorite_stations.append(station_id)
-                    st.success(f"Station {station_id} added to favorites!")
-                
-                # Show confidence intervals if requested
-                if show_confidence:
-                    st.markdown("### 📊 Prediction Confidence")
-                    confidence_data = []
-                    for pollutant, value in predicted_pollutants.items():
-                        # Simulate confidence intervals
-                        error = value * 0.1  # 10% error
-                        confidence_data.append({
-                            'Pollutant': pollutant,
-                            'Value': value,
-                            'Lower CI': max(0, value - error),
-                            'Upper CI': value + error
-                        })
+                if not station_data.empty:
+                    # Create comparison chart
+                    fig = go.Figure()
                     
-                    conf_df = pd.DataFrame(confidence_data)
-                    st.dataframe(conf_df, use_container_width=True)
-                
-                # Compare with historical data if requested
-                if compare_historical:
-                    st.markdown("### 📈 Historical Comparison")
-                    historical_data = sample_data[
-                        (sample_data['station_id'] == station_id) & 
-                        (sample_data['year'] >= year_input - 5)
-                    ]
+                    # Add historical data
+                    for pollutant in ['NH4', 'O2', 'NO3', 'PO4']:  # Show key pollutants
+                        if pollutant in station_data.columns:
+                            fig.add_trace(go.Scatter(
+                                x=station_data['date'],
+                                y=station_data[pollutant],
+                                mode='lines+markers',
+                                name=f'{pollutant} (Historical)',
+                                line=dict(width=2)
+                            ))
                     
-                    if not historical_data.empty:
-                        fig = px.line(
-                            historical_data, 
-                            x='year', 
-                            y=list(predicted_pollutants.keys()),
-                            title=f"Historical Trends for Station {station_id}",
-                            labels={'value': 'Concentration', 'year': 'Year'}
-                        )
-                        
-                        # Add current prediction as points
-                        for pollutant, value in predicted_pollutants.items():
-                            fig.add_scatter(
-                                x=[year_input], 
-                                y=[value], 
-                                mode='markers', 
-                                marker=dict(size=12, color='red'),
-                                name=f'{pollutant} (Predicted)'
-                            )
-                        
-                        st.plotly_chart(fig, use_container_width=True)
-                    else:
-                        st.info("No historical data available for this station.")
-                
-            except Exception as e:
-                st.error(f"⚠️ An error occurred during prediction: {str(e)}")
+                    # Add prediction point
+                    pred_date = f"{year_input}-{month_input:02d}-15"  # Use 15th of month
+                    for pollutant in ['NH4', 'O2', 'NO3', 'PO4']:
+                        if pollutant in predicted_pollutants:
+                            fig.add_trace(go.Scatter(
+                                x=[pred_date],
+                                y=[predicted_pollutants[pollutant]],
+                                mode='markers',
+                                name=f'{pollutant} (Predicted)',
+                                marker=dict(size=12, symbol='star')
+                            ))
+                    
+                    fig.update_layout(
+                        title=f"Historical vs Predicted Values for Station {station_id}",
+                        xaxis_title="Date",
+                        yaxis_title="Concentration (mg/L)",
+                        hovermode='x unified'
+                    )
+                    
+                    st.plotly_chart(fig, use_container_width=True)
+                else:
+                    st.info("No historical data available for this station.")
+            
+        except Exception as e:
+            st.error(f"⚠️ Error during prediction: {str(e)}")
 
 # PAGE: DATA ANALYSIS
 elif page == "📊 Data Analysis":
     st.markdown("<h1 class='main-header'>📊 Data Analysis</h1>", unsafe_allow_html=True)
     
+    if data is None:
+        st.error("❌ Dataset not available.")
+        st.stop()
+    
+    # Dataset overview
     st.markdown("## 📈 Dataset Overview")
     
-    # Dataset statistics
     col1, col2, col3, col4 = st.columns(4)
     
     with col1:
-        st.metric("📊 Total Records", f"{len(sample_data):,}")
+        st.metric("📊 Total Records", f"{len(data):,}")
     with col2:
-        st.metric("🏭 Unique Stations", sample_data['station_id'].nunique())
+        st.metric("🏭 Unique Stations", data['station_id'].nunique())
     with col3:
-        st.metric("📅 Years Covered", f"{sample_data['year'].min()} - {sample_data['year'].max()}")
+        st.metric("📅 Date Range", f"{data['date'].min().strftime('%Y-%m-%d')} to {data['date'].max().strftime('%Y-%m-%d')}")
     with col4:
         st.metric("🧪 Pollutants", len(pollutant_info))
     
     # Data preview
     st.markdown("### 👁️ Data Preview")
-    st.dataframe(sample_data.head(10), use_container_width=True)
+    st.dataframe(data.head(10), use_container_width=True)
     
     # Statistical summary
     st.markdown("### 📊 Statistical Summary")
-    pollutant_cols = ['O₂', 'NO₃', 'NO₂', 'SO₄', 'PO₄', 'Cl⁻']
-    summary_stats = sample_data[pollutant_cols].describe()
-    st.dataframe(summary_stats, use_container_width=True)
+    pollutant_cols = list(pollutant_info.keys())
+    available_cols = [col for col in pollutant_cols if col in data.columns]
+    
+    if available_cols:
+        summary_stats = data[available_cols].describe()
+        st.dataframe(summary_stats, use_container_width=True)
+    
+    # Missing data analysis
+    st.markdown("### 🔍 Missing Data Analysis")
+    missing_data = data[available_cols].isnull().sum()
+    if missing_data.sum() > 0:
+        fig = px.bar(
+            x=missing_data.index,
+            y=missing_data.values,
+            title="Missing Data Count by Pollutant",
+            labels={'x': 'Pollutant', 'y': 'Missing Count'}
+        )
+        st.plotly_chart(fig, use_container_width=True)
+    else:
+        st.success("✅ No missing data found!")
     
     # Correlation analysis
     st.markdown("### 🔗 Pollutant Correlations")
-    corr_matrix = sample_data[pollutant_cols].corr()
+    if len(available_cols) > 1:
+        corr_matrix = data[available_cols].corr()
+        
+        fig = px.imshow(
+            corr_matrix,
+            text_auto=True,
+            aspect="auto",
+            color_continuous_scale='RdBu_r',
+            title="Correlation Matrix of Pollutants"
+        )
+        st.plotly_chart(fig, use_container_width=True)
     
-    fig = px.imshow(
-        corr_matrix,
-        text_auto=True,
-        aspect="auto",
-        color_continuous_scale='RdBu_r',
-        title="Correlation Matrix of Pollutants"
-    )
-    st.plotly_chart(fig, use_container_width=True)
-    
-    # Pollution trends over time
-    st.markdown("### 📈 Pollution Trends Over Time")
-    yearly_avg = sample_data.groupby('year')[pollutant_cols].mean().reset_index()
+    # Temporal trends
+    st.markdown("### 📈 Temporal Trends")
+    yearly_avg = data.groupby('year')[available_cols].mean().reset_index()
     
     fig = px.line(
         yearly_avg,
         x='year',
-        y=pollutant_cols,
+        y=available_cols,
         title="Average Pollutant Levels Over Time",
-        labels={'value': 'Average Concentration', 'year': 'Year'}
+        labels={'value': 'Average Concentration (mg/L)', 'year': 'Year'}
     )
     st.plotly_chart(fig, use_container_width=True)
-    
-    # Station comparison
-    st.markdown("### 🏭 Station Comparison")
-    selected_stations = st.multiselect(
-        "Select stations to compare:",
-        options=sample_data['station_id'].unique(),
-        default=sample_data['station_id'].unique()[:5]
-    )
-    
-    if selected_stations:
-        station_data = sample_data[sample_data['station_id'].isin(selected_stations)]
-        station_avg = station_data.groupby('station_id')[pollutant_cols].mean().reset_index()
-        
-        fig = px.bar(
-            station_avg,
-            x='station_id',
-            y=pollutant_cols,
-            title="Average Pollutant Levels by Station",
-            labels={'value': 'Average Concentration', 'station_id': 'Station ID'}
-        )
-        st.plotly_chart(fig, use_container_width=True)
 
 # PAGE: VISUALIZATIONS
 elif page == "📈 Visualizations":
     st.markdown("<h1 class='main-header'>📈 Data Visualizations</h1>", unsafe_allow_html=True)
+    
+    if data is None:
+        st.error("❌ Dataset not available.")
+        st.stop()
     
     # Visualization controls
     st.markdown("## 🎛️ Visualization Controls")
     
     col1, col2, col3 = st.columns(3)
     
+    available_pollutants = [col for col in pollutant_info.keys() if col in data.columns]
+    
     with col1:
         viz_type = st.selectbox(
             "Choose visualization type:",
-            ["Time Series", "Distribution", "Comparison", "Heatmap", "3D Scatter"]
+            ["Time Series", "Distribution", "Station Comparison", "Seasonal Analysis", "Correlation Heatmap"]
         )
     
     with col2:
         selected_pollutant = st.selectbox(
             "Select pollutant:",
-            options=list(pollutant_info.keys())
+            options=available_pollutants
         )
     
     with col3:
-        year_range = st.slider(
-            "Select year range:",
-            min_value=int(sample_data['year'].min()),
-            max_value=int(sample_data['year'].max()),
-            value=(int(sample_data['year'].min()), int(sample_data['year'].max()))
+        selected_stations = st.multiselect(
+            "Select stations:",
+            options=sorted(data['station_id'].unique()),
+            default=sorted(data['station_id'].unique())[:5]
         )
     
-    # Filter data based on selections
-    filtered_data = sample_data[
-        (sample_data['year'] >= year_range[0]) & 
-        (sample_data['year'] <= year_range[1])
-    ]
+    # Filter data
+    if selected_stations:
+        filtered_data = data[data['station_id'].isin(selected_stations)]
+    else:
+        filtered_data = data
     
-    # Generate visualizations based on selection
+    # Generate visualizations
     if viz_type == "Time Series":
         st.markdown("### 📈 Time Series Analysis")
         
-        # Monthly trends (simulated)
-        monthly_data = []
-        for _, row in filtered_data.iterrows():
-            for month in range(1, 13):
-                monthly_data.append({
-                    'year': row['year'],
-                    'month': month,
-                    'date': f"{row['year']}-{month:02d}",
-                    'station_id': row['station_id'],
-                    selected_pollutant: row[selected_pollutant] * (1 + np.random.normal(0, 0.1))
-                })
-        
-        monthly_df = pd.DataFrame(monthly_data)
-        monthly_avg = monthly_df.groupby('date')[selected_pollutant].mean().reset_index()
-        
-        fig = px.line(
-            monthly_avg,
-            x='date',
-            y=selected_pollutant,
-            title=f"{selected_pollutant} Levels Over Time",
-            labels={'date': 'Date', selected_pollutant: f'{selected_pollutant} ({pollutant_info[selected_pollutant]["unit"]})'}
-        )
-        
-        # Add safe range
-        safe_min, safe_max = pollutant_info[selected_pollutant]['safe_range']
-        fig.add_hline(y=safe_min, line_dash="dash", line_color="green", annotation_text="Safe Min")
-        fig.add_hline(y=safe_max, line_dash="dash", line_color="red", annotation_text="Safe Max")
-        
-        st.plotly_chart(fig, use_container_width=True)
+        if not filtered_data.empty:
+            # Group by date and calculate mean for multiple stations
+            time_series = filtered_data.groupby('date')[selected_pollutant].mean().reset_index()
+            
+            fig = px.line(
+                time_series,
+                x='date',
+                y=selected_pollutant,
+                title=f"{selected_pollutant} Levels Over Time",
+                labels={'date': 'Date', selected_pollutant: f'{selected_pollutant} ({pollutant_info[selected_pollutant]["unit"]})'}
+            )
+            
+            # Add safe range lines
+            if selected_pollutant in pollutant_info:
+                safe_min, safe_max = pollutant_info[selected_pollutant]['safe_range']
+                fig.add_hline(y=safe_min, line_dash="dash", line_color="green", annotation_text="Safe Min")
+                fig.add_hline(y=safe_max, line_dash="dash", line_color="red", annotation_text="Safe Max")
+            
+            st.plotly_chart(fig, use_container_width=True)
+        else:
+            st.warning("No data available for selected stations.")
     
     elif viz_type == "Distribution":
         st.markdown("### 📊 Distribution Analysis")
@@ -557,15 +664,8 @@ elif page == "📈 Visualizations":
             )
             st.plotly_chart(fig, use_container_width=True)
     
-    elif viz_type == "Comparison":
-        st.markdown("### 🔍 Station Comparison")
-        
-        # Select stations for comparison
-        selected_stations = st.multiselect(
-            "Select stations to compare:",
-            options=filtered_data['station_id'].unique(),
-            default=filtered_data['station_id'].unique()[:5]
-        )
+    elif viz_type == "Station Comparison":
+        st.markdown("### 🏭 Station Comparison")
         
         if selected_stations:
             comparison_data = filtered_data[filtered_data['station_id'].isin(selected_stations)]
@@ -578,469 +678,23 @@ elif page == "📈 Visualizations":
                 labels={'station_id': 'Station ID', selected_pollutant: f'{selected_pollutant} ({pollutant_info[selected_pollutant]["unit"]})'}
             )
             st.plotly_chart(fig, use_container_width=True)
-    
-    elif viz_type == "Heatmap":
-        st.markdown("### 🌡️ Correlation Heatmap")
-        
-        # Create correlation matrix
-        pollutant_cols = ['O₂', 'NO₃', 'NO₂', 'SO₄', 'PO₄', 'Cl⁻']
-        corr_matrix = filtered_data[pollutant_cols].corr()
-        
-        fig = px.imshow(
-            corr_matrix,
-            text_auto=True,
-            aspect="auto",
-            color_continuous_scale='RdBu_r',
-            title="Pollutant Correlation Heatmap"
-        )
-        st.plotly_chart(fig, use_container_width=True)
-    
-    elif viz_type == "3D Scatter":
-        st.markdown("### 🌐 3D Scatter Plot")
-        
-        # Select three pollutants for 3D visualization
-        col1, col2, col3 = st.columns(3)
-        
-        with col1:
-            x_axis = st.selectbox("X-axis:", options=list(pollutant_info.keys()), index=0)
-        with col2:
-            y_axis = st.selectbox("Y-axis:", options=list(pollutant_info.keys()), index=1)
-        with col3:
-            z_axis = st.selectbox("Z-axis:", options=list(pollutant_info.keys()), index=2)
-        
-        if len(set([x_axis, y_axis, z_axis])) == 3:
-            fig = px.scatter_3d(
-                filtered_data,
-                x=x_axis,
-                y=y_axis,
-                z=z_axis,
-                color='year',
-                title=f"3D Scatter: {x_axis} vs {y_axis} vs {z_axis}",
-                labels={
-                    x_axis: f'{x_axis} ({pollutant_info[x_axis]["unit"]})',
-                    y_axis: f'{y_axis} ({pollutant_info[y_axis]["unit"]})',
-                    z_axis: f'{z_axis} ({pollutant_info[z_axis]["unit"]})'
-                }
-            )
-            st.plotly_chart(fig, use_container_width=True)
         else:
-            st.warning("Please select three different pollutants for 3D visualization.")
-
-# PAGE: MODEL INSIGHTS
-elif page == "🎯 Model Insights":
-    st.markdown("<h1 class='main-header'>🎯 Model Insights</h1>", unsafe_allow_html=True)
+            st.warning("Please select at least one station.")
     
-    # Model information
-    st.markdown("## 🤖 Model Information")
-    
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        st.markdown("""
-        <div class='info-box'>
-            <h3>🧠 Model Architecture</h3>
-            <ul>
-                <li><strong>Algorithm:</strong> Random Forest Regressor</li>
-                <li><strong>Features:</strong> Year, Station ID (encoded)</li>
-                <li><strong>Targets:</strong> 6 pollutant levels</li>
-                <li><strong>Training Data:</strong> 2000+ samples</li>
-            </ul>
-        </div>
-        """, unsafe_allow_html=True)
-    
-    with col2:
-        st.markdown("""
-        <div class='info-box'>
-            <h3>📊 Performance Metrics</h3>
-            <ul>
-                <li><strong>R² Score:</strong> 0.95</li>
-                <li><strong>RMSE:</strong> 0.23</li>
-                <li><strong>MAE:</strong> 0.18</li>
-                <li><strong>Cross-validation:</strong> 5-fold</li>
-            </ul>
-        </div>
-        """, unsafe_allow_html=True)
-    
-    # Feature importance (simulated)
-    st.markdown("### 🎯 Feature Importance")
-    
-    # Simulate feature importance
-    features = ['Year', 'Station_STN001', 'Station_STN002', 'Station_STN003', 'Station_STN004', 'Station_STN005']
-    importance = [0.3, 0.15, 0.12, 0.18, 0.13, 0.12]
-    
-    fig = px.bar(
-        x=importance,
-        y=features,
-        orientation='h',
-        title="Feature Importance in Pollution Prediction",
-        labels={'x': 'Importance Score', 'y': 'Features'}
-    )
-    st.plotly_chart(fig, use_container_width=True)
-    
-    # Model validation
-    st.markdown("### ✅ Model Validation")
-    
-    # Simulated validation metrics for each pollutant
-    validation_metrics = {
-        'Pollutant': list(pollutant_info.keys()),
-        'R² Score': [0.94, 0.96, 0.93, 0.95, 0.97, 0.92],
-        'RMSE': [0.21, 0.18, 0.25, 0.19, 0.16, 0.28],
-        'MAE': [0.16, 0.14, 0.20, 0.15, 0.12, 0.22]
-    }
-    
-    validation_df = pd.DataFrame(validation_metrics)
-    st.dataframe(validation_df, use_container_width=True)
-    
-    # Learning curves
-    st.markdown("### 📈 Learning Curves")
-    
-    # Simulate learning curve data
-    train_sizes = [100, 200, 500, 1000, 1500, 2000]
-    train_scores = [0.85, 0.88, 0.92, 0.94, 0.95, 0.95]
-    val_scores = [0.80, 0.84, 0.89, 0.93, 0.94, 0.94]
-    
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(x=train_sizes, y=train_scores, mode='lines+markers', name='Training Score'))
-    fig.add_trace(go.Scatter(x=train_sizes, y=val_scores, mode='lines+markers', name='Validation Score'))
-    
-    fig.update_layout(
-        title="Model Learning Curves",
-        xaxis_title="Training Set Size",
-        yaxis_title="R² Score",
-        hovermode='x unified'
-    )
-    
-    st.plotly_chart(fig, use_container_width=True)
-    
-    # Residual analysis
-    st.markdown("### 🎯 Residual Analysis")
-    
-    # Generate simulated residuals
-    np.random.seed(42)
-    predicted_values = np.random.normal(10, 5, 200)
-    residuals = np.random.normal(0, 1, 200)
-    
-    fig = px.scatter(
-        x=predicted_values,
-        y=residuals,
-        title="Residual Plot",
-        labels={'x': 'Predicted Values', 'y': 'Residuals'}
-    )
-    fig.add_hline(y=0, line_dash="dash", line_color="red")
-    st.plotly_chart(fig, use_container_width=True)
-
-# PAGE: HISTORY
-elif page == "📋 History":
-    st.markdown("<h1 class='main-header'>📋 Prediction History</h1>", unsafe_allow_html=True)
-    
-    if not st.session_state.prediction_history:
-        st.info("No predictions made yet. Visit the Predictor page to make your first prediction!")
+    elif viz_type == "Seasonal Analysis":
+        st.markdown("### 🌱 Seasonal Analysis")
         
-        # Sample predictions for demonstration
-        if st.button("Load Sample History"):
-            sample_history = [
-                {
-                    'timestamp': '2024-01-15 10:30:00',
-                    'station': 'STN001',
-                    'year': 2024,
-                    'quality': 'Good',
-                    'pollutants': {'O₂': 8.5, 'NO₃': 4.2, 'NO₂': 0.3, 'SO₄': 18.0, 'PO₄': 0.04, 'Cl⁻': 12.5}
-                },
-                {
-                    'timestamp': '2024-01-15 11:45:00',
-                    'station': 'STN002',
-                    'year': 2024,
-                    'quality': 'Excellent',
-                    'pollutants': {'O₂': 9.2, 'NO₃': 2.8, 'NO₂': 0.2, 'SO₄': 15.0, 'PO₄': 0.03, 'Cl⁻': 10.0}
-                },
-                {
-                    'timestamp': '2024-01-15 14:20:00',
-                    'station': 'STN003',
-                    'year': 2023,
-                    'quality': 'Fair',
-                    'pollutants': {'O₂': 6.8, 'NO₃': 8.5, 'NO₂': 0.8, 'SO₄': 35.0, 'PO₄': 0.08, 'Cl⁻': 25.0}
-                }
-            ]
-            st.session_state.prediction_history = sample_history
-            st.rerun()
-    
-    else:
-        # Display prediction history
-        st.markdown("## 🕐 Recent Predictions")
+        # Add month names
+        month_names = {1: 'Jan', 2: 'Feb', 3: 'Mar', 4: 'Apr', 5: 'May', 6: 'Jun',
+                      7: 'Jul', 8: 'Aug', 9: 'Sep', 10: 'Oct', 11: 'Nov', 12: 'Dec'}
         
-        # Summary statistics
-        col1, col2, col3, col4 = st.columns(4)
+        filtered_data['month_name'] = filtered_data['month'].map(month_names)
         
-        with col1:
-            st.metric("Total Predictions", len(st.session_state.prediction_history))
+        seasonal_data = filtered_data.groupby('month_name')[selected_pollutant].mean().reset_index()
         
-        with col2:
-            unique_stations = len(set(pred['station'] for pred in st.session_state.prediction_history))
-            st.metric("Unique Stations", unique_stations)
-        
-        with col3:
-            quality_counts = {}
-            for pred in st.session_state.prediction_history:
-                quality = pred['quality']
-                quality_counts[quality] = quality_counts.get(quality, 0) + 1
-            most_common_quality = max(quality_counts, key=quality_counts.get) if quality_counts else "N/A"
-            st.metric("Most Common Quality", most_common_quality)
-        
-        with col4:
-            if st.button("Clear History"):
-                st.session_state.prediction_history = []
-                st.rerun()
-        
-        # Detailed history table
-        st.markdown("### 📊 Detailed History")
-        
-        # Convert history to DataFrame for better display
-        history_data = []
-        for pred in reversed(st.session_state.prediction_history):  # Most recent first
-            history_data.append({
-                'Timestamp': pred['timestamp'],
-                'Station': pred['station'],
-                'Year': pred['year'],
-                'Quality': pred['quality'],
-                'O₂': f"{pred['pollutants']['O₂']:.2f}",
-                'NO₃': f"{pred['pollutants']['NO₃']:.2f}",
-                'NO₂': f"{pred['pollutants']['NO₂']:.2f}",
-                'SO₄': f"{pred['pollutants']['SO₄']:.2f}",
-                'PO₄': f"{pred['pollutants']['PO₄']:.2f}",
-                'Cl⁻': f"{pred['pollutants']['Cl⁻']:.2f}"
-            })
-        
-        if history_data:
-            history_df = pd.DataFrame(history_data)
-            st.dataframe(history_df, use_container_width=True)
-            
-            # Download option
-            csv = history_df.to_csv(index=False)
-            st.download_button(
-                label="📥 Download History as CSV",
-                data=csv,
-                file_name=f"prediction_history_{datetime.now().strftime('%Y%m%d_%H%M%S')}.csv",
-                mime="text/csv"
-            )
-            
-            # Visualization of history
-            st.markdown("### 📈 History Visualization")
-            
-            # Quality distribution
-            col1, col2 = st.columns(2)
-            
-            with col1:
-                quality_counts = history_df['Quality'].value_counts()
-                fig = px.pie(
-                    values=quality_counts.values,
-                    names=quality_counts.index,
-                    title="Water Quality Distribution"
-                )
-                st.plotly_chart(fig, use_container_width=True)
-            
-            with col2:
-                station_counts = history_df['Station'].value_counts()
-                fig = px.bar(
-                    x=station_counts.index,
-                    y=station_counts.values,
-                    title="Predictions by Station"
-                )
-                st.plotly_chart(fig, use_container_width=True)
-    
-    # Favorite stations
-    st.markdown("## ⭐ Favorite Stations")
-    
-    if st.session_state.favorite_stations:
-        st.write("Your favorite monitoring stations:")
-        for station in st.session_state.favorite_stations:
-            col1, col2 = st.columns([3, 1])
-            with col1:
-                st.write(f"🏭 {station}")
-            with col2:
-                if st.button(f"Remove", key=f"remove_{station}"):
-                    st.session_state.favorite_stations.remove(station)
-                    st.rerun()
-    else:
-        st.info("No favorite stations yet. Add stations to favorites from the Predictor page!")
-
-# PAGE: ABOUT
-elif page == "ℹ️ About":
-    st.markdown("<h1 class='main-header'>ℹ️ About This Application</h1>", unsafe_allow_html=True)
-    
-    # Application overview
-    st.markdown("""
-    <div class='info-box'>
-        <h2>🌊 Water Quality Monitoring System</h2>
-        <p>This comprehensive platform provides advanced water quality monitoring and prediction capabilities 
-        using machine learning technologies. The system helps environmental scientists, water management authorities, 
-        and researchers make informed decisions about water quality management.</p>
-    </div>
-    """, unsafe_allow_html=True)
-    
-    # Key features
-    st.markdown("## 🚀 Key Features")
-    
-    features = [
-        {
-            "icon": "🔍",
-            "title": "Smart Predictions",
-            "description": "AI-powered predictions of water pollutant levels based on historical data and environmental factors."
-        },
-        {
-            "icon": "📊",
-            "title": "Comprehensive Analytics",
-            "description": "Advanced data analysis tools including statistical summaries, correlation analysis, and trend identification."
-        },
-        {
-            "icon": "📈",
-            "title": "Interactive Visualizations",
-            "description": "Rich, interactive charts and graphs for better understanding of water quality patterns."
-        },
-        {
-            "icon": "🎯",
-            "title": "Model Insights",
-            "description": "Detailed information about model performance, feature importance, and validation metrics."
-        },
-        {
-            "icon": "📋",
-            "title": "Prediction History",
-            "description": "Track and analyze your prediction history with export capabilities."
-        },
-        {
-            "icon": "⚡",
-            "title": "Real-time Processing",
-            "description": "Fast, efficient processing of predictions with confidence intervals."
-        }
-    ]
-    
-    cols = st.columns(2)
-    for i, feature in enumerate(features):
-        with cols[i % 2]:
-            st.markdown(f"""
-            <div class='metric-card'>
-                <h3>{feature['icon']} {feature['title']}</h3>
-                <p>{feature['description']}</p>
-            </div>
-            """, unsafe_allow_html=True)
-    
-    # Pollutant information
-    st.markdown("## 🧪 Monitored Pollutants")
-    
-    for pollutant, info in pollutant_info.items():
-        with st.expander(f"{pollutant} - {info['name']}"):
-            col1, col2 = st.columns(2)
-            
-            with col1:
-                st.write(f"**Unit:** {info['unit']}")
-                st.write(f"**Safe Range:** {info['safe_range'][0]} - {info['safe_range'][1]} {info['unit']}")
-            
-            with col2:
-                st.write(f"**Description:** {info['description']}")
-                
-                # Health impact information
-                if pollutant == 'O₂':
-                    st.write("**Impact:** Essential for aquatic life survival")
-                elif pollutant in ['NO₃', 'NO₂']:
-                    st.write("**Impact:** Can cause eutrophication and harm aquatic ecosystems")
-                elif pollutant == 'SO₄':
-                    st.write("**Impact:** Industrial pollutant, can affect water taste and odor")
-                elif pollutant == 'PO₄':
-                    st.write("**Impact:** Major cause of algal blooms and eutrophication")
-                elif pollutant == 'Cl⁻':
-                    st.write("**Impact:** Indicator of salt contamination")
-    
-    # Technical specifications
-    st.markdown("## ⚙️ Technical Specifications")
-    
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        st.markdown("""
-        <div class='info-box'>
-            <h3>🤖 Machine Learning</h3>
-            <ul>
-                <li><strong>Algorithm:</strong> Random Forest Regressor</li>
-                <li><strong>Libraries:</strong> Scikit-learn, Pandas, NumPy</li>
-                <li><strong>Features:</strong> Temporal and spatial variables</li>
-                <li><strong>Validation:</strong> Cross-validation with multiple metrics</li>
-            </ul>
-        </div>
-        """, unsafe_allow_html=True)
-    
-    with col2:
-        st.markdown("""
-        <div class='info-box'>
-            <h3>🖥️ Technology Stack</h3>
-            <ul>
-                <li><strong>Frontend:</strong> Streamlit</li>
-                <li><strong>Visualization:</strong> Plotly, Matplotlib</li>
-                <li><strong>Data Processing:</strong> Pandas, NumPy</li>
-                <li><strong>Deployment:</strong> Streamlit Cloud</li>
-            </ul>
-        </div>
-        """, unsafe_allow_html=True)
-    
-    # Data sources and methodology
-    st.markdown("## 📚 Data Sources & Methodology")
-    
-    st.markdown("""
-    <div class='info-box'>
-        <h3>📊 Data Collection</h3>
-        <p>The system uses historical water quality data from multiple monitoring stations across different regions. 
-        Data includes temporal measurements of various pollutants collected over multiple years.</p>
-        
-        <h3>🔬 Methodology</h3>
-        <p>The prediction model uses a multi-output regression approach to simultaneously predict levels of six 
-        different pollutants. The model incorporates temporal trends and station-specific characteristics to 
-        provide accurate predictions.</p>
-        
-        <h3>✅ Quality Assurance</h3>
-        <p>All predictions include confidence intervals and are validated against historical data. The system 
-        provides quality ratings based on established water quality standards.</p>
-    </div>
-    """, unsafe_allow_html=True)
-    
-    # Contact and support
-    st.markdown("## 📞 Support & Contact")
-    
-    col1, col2 = st.columns(2)
-    
-    with col1:
-        st.markdown("""
-        <div class='info-box'>
-            <h3>💬 Getting Help</h3>
-            <p>If you encounter any issues or have questions about using this application:</p>
-            <ul>
-                <li>Check the tooltips and help text throughout the app</li>
-                <li>Review the feature descriptions on this page</li>
-                <li>Use the sample data to explore features</li>
-            </ul>
-        </div>
-        """, unsafe_allow_html=True)
-    
-    with col2:
-        st.markdown("""
-        <div class='info-box'>
-            <h3>🚀 Future Enhancements</h3>
-            <p>Planned features for future versions:</p>
-            <ul>
-                <li>Real-time data integration</li>
-                <li>Advanced forecasting models</li>
-                <li>Mobile app compatibility</li>
-                <li>API access for external systems</li>
-            </ul>
-        </div>
-        """, unsafe_allow_html=True)
-    
-    # Version information
-    st.markdown("---")
-    st.markdown("**Version:** 2.0.0 | **Last Updated:** January 2024 | **Built with:** Streamlit 🎈")
-
-# Footer
-st.markdown("---")
-st.markdown("""
-<div style='text-align: center; color: #666; padding: 20px;'>
-    <p>💧 Water Quality Monitoring System | Built with ❤️ using Streamlit</p>
-    <p>🌍 Protecting our water resources through advanced analytics</p>
-</div>
-""", unsafe_allow_html=True)
+        fig = px.bar(
+            seasonal_data,
+            x='month_name',
+            y=selected_pollutant,
+            title=f"Monthly Average {selected_pollutant} Levels",
+            labels={'month_name': 'Month', selected_pollutant: f'{selecte
